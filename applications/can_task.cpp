@@ -83,6 +83,7 @@ float ratio_from_switch(sp::DBusSwitchMode mode)
   return 0.5f;
 }
 
+// 将电机反馈数据从CAN总线读取到电机对象中
 void send_motor_commands(float torque_a, float torque_b)
 {
   for (uint8_t i = 0; i < sp::CAN_DATA_LEN; i++)
@@ -97,6 +98,7 @@ void send_motor_commands(float torque_a, float torque_b)
   can1.send(motor_a.tx_id);
 }
 
+// 读取电机反馈数据
 void read_motor_feedback(uint32_t stamp_ms)
 {
   while (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) > 0) {
@@ -112,6 +114,7 @@ void read_motor_feedback(uint32_t stamp_ms)
   }
 }
 
+// 将角度变化量限制在 [-pi, pi] 范围内, 以便处理角度环绕问题
 float unwrap_delta(float delta)
 {
   if (delta > PI) return delta - 2.0f * PI;
@@ -126,23 +129,23 @@ extern "C" void can_task(void const * argument)
   can1.config();
   can1.start();
 
-  bool have_yaw = false;
-  bool baseline_ready = false;
+  bool have_yaw = false;// 只有当IMU正常工作时，才认为有有效的yaw数据
+  bool baseline_ready = false;// 只有当遥控器、两台电机和IMU都正常工作时，才认为基线已准备好
   bool have_window = false;
   bool follow_pending = false;
   bool have_right_switch = false;
-  float last_yaw_raw = 0.0f;
-  float yaw_unwrapped = 0.0f;
-  float startup_yaw = 0.0f;
-  float startup_a = 0.0f;
-  float startup_b = 0.0f;
-  float yaw_bias = 0.0f;
-  float a_link_offset = 0.0f;
-  float b_link_offset = 0.0f;
-  float link_ratio = 0.5f;
-  float window_yaw = 0.0f;
-  float window_a = 0.0f;
-  float window_b = 0.0f;
+  float last_yaw_raw = 0.0f;// 记录上一次的原始yaw值，用于计算角度变化量
+  float yaw_unwrapped = 0.0f;// 记录解包后的yaw值
+  float startup_yaw = 0.0f;// 记录启动时的yaw值
+  float startup_a = 0.0f;// 记录启动时的电机A角度
+  float startup_b = 0.0f;// 记录启动时的电机B角度
+  float yaw_bias = 0.0f;// 记录yaw偏置
+  float a_link_offset = 0.0f;// 记录电机A连杆偏置
+  float b_link_offset = 0.0f;// 记录电机B连杆偏置
+  float link_ratio = 0.5f;// 记录联动比例
+  float window_yaw = 0.0f;// 记录窗口内的yaw值
+  float window_a = 0.0f;// 记录窗口内的电机A角度
+  float window_b = 0.0f;// 记录窗口内的电机B角度
   uint32_t window_start_ms = 0;
   uint32_t settled_ms = 0;
   sp::DBusSwitchMode last_right_switch = sp::DBusSwitchMode::DOWN;

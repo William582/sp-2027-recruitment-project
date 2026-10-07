@@ -4,7 +4,7 @@
 
 extern sp::Mahony imu;
 
-sp::Plotter plotter(&huart6, false);
+sp::Plotter plotter(&huart1, false);
 
 extern "C" void plotter_task(void const * argument)
 {
