@@ -58,7 +58,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     sp_middleware/io/dbus/dbus.cpp
     applications/can_task.cpp
     sp_middleware/io/can/can.cpp
+    sp_middleware/tools/math_tools/math_tools.cpp
     sp_middleware/motor/rm_motor/rm_motor.cpp
+    sp_middleware/tools/pid/pid.cpp
 )
 
 # Add include paths

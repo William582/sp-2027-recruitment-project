@@ -6,9 +6,9 @@ sp::Buzzer buzzer(&htim4, TIM_CHANNEL_3, 84e6);
 extern "C" void buzzer_task(void const * argument)
 {
   (void)argument;
-  buzzer.set(5000, 0.1f);
 
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i <= 3; i++) {
+    buzzer.set(i * 1000 + 500, 0.1f);
     buzzer.start();
     osDelay(100);
     buzzer.stop();

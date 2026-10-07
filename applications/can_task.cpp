@@ -5,6 +5,7 @@
 #include "io/dbus/dbus.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 #include "tools/mahony/mahony.hpp"
+#include "tools/pid/pid.hpp"
 
 extern sp::DBus remote;
 extern sp::Mahony imu;
@@ -19,26 +20,54 @@ namespace
 constexpr float PI = 3.14159265358979323846f;
 constexpr float MOTOR_A_ENCODER_SIGN = 1.0f;
 constexpr float MOTOR_B_ENCODER_SIGN = 1.0f;
-constexpr bool MOTOR_DIRECTIONS_VERIFIED = false;
+constexpr bool MOTOR_DIRECTIONS_VERIFIED = false;// true if the motor directions have been verified to match the expected behavior
 
 constexpr float MAX_OUTPUT_SPEED = 10.0f;
 constexpr float MAX_TORQUE = 0.5f;
+// PID parameters for position and speed control
 constexpr float POSITION_TO_SPEED_GAIN = 2.0f;
 constexpr float SPEED_TO_TORQUE_GAIN = 0.05f;
+//parameters for position PID control
+constexpr float PID_DT = 0.001f;
+constexpr float POSITION_PID_KI = 0.01f;
+constexpr float POSITION_PID_MAX_IOUT = 0.5f;
+constexpr float POSITION_PID_INTEGRAL_PAUSE = 2.0f;
+//parameters for speed PID control
+constexpr float SPEED_PID_KI = 0.002f;
+constexpr float SPEED_PID_MAX_IOUT = 0.05f;//积分项最大输出
+constexpr float SPEED_PID_INTEGRAL_PAUSE = 0.15f;// 0.15s内速度误差大于0.15rad/s时暂停积分
+constexpr float PID_D_FILTER_ALPHA = 0.1f;//微分项滤波系数，alpha=1时不滤波
+
+sp::PID position_pid_a(
+  PID_DT, POSITION_TO_SPEED_GAIN, POSITION_PID_KI, 0.0f, MAX_OUTPUT_SPEED,
+  POSITION_PID_MAX_IOUT, PID_D_FILTER_ALPHA, false, true);
+sp::PID speed_pid_a(
+  PID_DT, SPEED_TO_TORQUE_GAIN, SPEED_PID_KI, 0.0f, MAX_TORQUE, SPEED_PID_MAX_IOUT,
+  PID_D_FILTER_ALPHA, false, true);
+sp::PID position_pid_b(
+  PID_DT, POSITION_TO_SPEED_GAIN, POSITION_PID_KI, 0.0f, MAX_OUTPUT_SPEED,
+  POSITION_PID_MAX_IOUT, PID_D_FILTER_ALPHA, false, true);
+sp::PID speed_pid_b(
+  PID_DT, SPEED_TO_TORQUE_GAIN, SPEED_PID_KI, 0.0f, MAX_TORQUE, SPEED_PID_MAX_IOUT,
+  PID_D_FILTER_ALPHA, false, true);
 
 constexpr uint32_t MANUAL_DETECT_WINDOW_MS = 50;
 constexpr uint32_t FOLLOW_SETTLE_TIME_MS = 100;
+//在检测时间窗内，若 yaw 变化量达到或超过 0.01，就认为 yaw 有动作并进入待跟随状态
 constexpr float MANUAL_YAW_STABLE_DELTA = 0.01f;
+//若某个电机角度变化量达到或超过 0.05，且另一个电机基本没动，则认为检测到该电机的手动转动。
 constexpr float MANUAL_MOTOR_DELTA = 0.05f;
 constexpr float OTHER_MOTOR_STABLE_DELTA = 0.015f;
+//稳定条件：在待跟随状态下，若电机角度与目标角度的差值小于 0.03 rad，且电机速度小于 0.1 rad/s，则认为电机已稳定到位。
 constexpr float FOLLOW_POSITION_TOLERANCE = 0.03f;
 constexpr float FOLLOW_SPEED_TOLERANCE = 0.1f;
 
-float clamp(float value, float limit)
+void clear_control_pids()
 {
-  if (value > limit) return limit;
-  if (value < -limit) return -limit;
-  return value;
+  position_pid_a.clear();
+  speed_pid_a.clear();
+  position_pid_b.clear();
+  speed_pid_b.clear();
 }
 
 float ratio_from_switch(sp::DBusSwitchMode mode)
@@ -54,15 +83,12 @@ float ratio_from_switch(sp::DBusSwitchMode mode)
   return 0.5f;
 }
 
-float position_control(float target, float position, float speed)
-{
-  const float desired_speed = clamp((target - position) * POSITION_TO_SPEED_GAIN, MAX_OUTPUT_SPEED);
-  return clamp((desired_speed - speed) * SPEED_TO_TORQUE_GAIN, MAX_TORQUE);
-}
-
 void send_motor_commands(float torque_a, float torque_b)
 {
-  for (uint8_t i = 0; i < sp::CAN_DATA_LEN; i++) can1.tx_data[i] = 0;
+  for (uint8_t i = 0; i < sp::CAN_DATA_LEN; i++)
+  {
+    can1.tx_data[i] = 0;
+  }
 
   motor_a.cmd(MOTOR_A_ENCODER_SIGN * torque_a);
   motor_b.cmd(MOTOR_B_ENCODER_SIGN * torque_b);
@@ -167,6 +193,7 @@ extern "C" void can_task(void const * argument)
       const float ratio = ratio_from_switch(remote.sw_l);
 
       if (!have_right_switch || right_switch != last_right_switch) {
+        clear_control_pids();
         if (right_switch == sp::DBusSwitchMode::MID) {
           yaw_bias = 0.0f;
           a_link_offset = angle_a - yaw_unwrapped;
@@ -247,18 +274,28 @@ extern "C" void can_task(void const * argument)
           }
         }
 
-        torque_a = position_control(target_a, angle_a, speed_a);
-        torque_b = position_control(target_b, angle_b, speed_b);
+        position_pid_a.calc(target_a, angle_a, POSITION_PID_INTEGRAL_PAUSE);
+        speed_pid_a.calc(position_pid_a.out, speed_a, SPEED_PID_INTEGRAL_PAUSE);
+        position_pid_b.calc(target_b, angle_b, POSITION_PID_INTEGRAL_PAUSE);
+        speed_pid_b.calc(position_pid_b.out, speed_b, SPEED_PID_INTEGRAL_PAUSE);
+        torque_a = speed_pid_a.out;
+        torque_b = speed_pid_b.out;
       }
       else if (right_switch == sp::DBusSwitchMode::UP) {
         const float yaw_delta = yaw_unwrapped - startup_yaw;
         const float target_a = startup_a + yaw_delta;
         const float target_b = startup_b + ratio * yaw_delta;
-        torque_a = position_control(target_a, angle_a, speed_a);
-        torque_b = position_control(target_b, angle_b, speed_b);
+        position_pid_a.calc(target_a, angle_a, POSITION_PID_INTEGRAL_PAUSE);
+        speed_pid_a.calc(position_pid_a.out, speed_a, SPEED_PID_INTEGRAL_PAUSE);
+        position_pid_b.calc(target_b, angle_b, POSITION_PID_INTEGRAL_PAUSE);
+        speed_pid_b.calc(position_pid_b.out, speed_b, SPEED_PID_INTEGRAL_PAUSE);
+        torque_a = speed_pid_a.out;
+        torque_b = speed_pid_b.out;
       }
     }
-    send_motor_commands(torque_a, torque_b);
+    else {
+      clear_control_pids();
+    }
     send_motor_commands(torque_a, torque_b);
     osDelay(1);
   }
