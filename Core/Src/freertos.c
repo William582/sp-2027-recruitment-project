@@ -61,12 +61,12 @@ osThreadId CANTaskHandle;
 /* USER CODE END FunctionPrototypes */
 
 void StartDefaultTask(void const * argument);
-extern void led_task(void const * argument);
-extern void buzzer_task(void const * argument);
-extern void imu_task(void const * argument);
-extern void dt7_task(void const * argument);
-extern void plotter_task(void const * argument);
-extern void can_task(void const * argument);
+void led_task(void const * argument);
+void buzzer_task(void const * argument);
+void imu_task(void const * argument);
+void dt7_task(void const * argument);
+void plotter_task(void const * argument);
+void can_task(void const * argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -165,6 +165,113 @@ void StartDefaultTask(void const * argument)
   /* USER CODE END StartDefaultTask */
 }
 
+/* USER CODE BEGIN Header_led_task */
+/**
+* @brief Function implementing the LEDTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_led_task */
+void led_task(void const * argument)
+{
+  /* USER CODE BEGIN led_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END led_task */
+}
+
+/* USER CODE BEGIN Header_buzzer_task */
+/**
+* @brief Function implementing the BuzzerTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_buzzer_task */
+void buzzer_task(void const * argument)
+{
+  /* USER CODE BEGIN buzzer_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END buzzer_task */
+}
+
+/* USER CODE BEGIN Header_imu_task */
+/**
+* @brief Function implementing the IMUTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_imu_task */
+void imu_task(void const * argument)
+{
+  /* USER CODE BEGIN imu_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END imu_task */
+}
+
+/* USER CODE BEGIN Header_dt7_task */
+/**
+* @brief Function implementing the Dt7Task thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_dt7_task */
+void dt7_task(void const * argument)
+{
+  /* USER CODE BEGIN dt7_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END dt7_task */
+}
+
+/* USER CODE BEGIN Header_plotter_task */
+/**
+* @brief Function implementing the PlotterTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_plotter_task */
+void plotter_task(void const * argument)
+{
+  /* USER CODE BEGIN plotter_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END plotter_task */
+}
+
+/* USER CODE BEGIN Header_can_task */
+/**
+* @brief Function implementing the CANTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_can_task */
+void can_task(void const * argument)
+{
+  /* USER CODE BEGIN can_task */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END can_task */
+}
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
