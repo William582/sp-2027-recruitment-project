@@ -137,6 +137,7 @@ extern "C" void can_task(void const * argument)
   osDelay(500);
   can1.config();
   can1.start();
+
   bool have_yaw = false;        // 只有当IMU正常工作时，才认为有有效的yaw数据
   bool baseline_ready = false;  // 只有当遥控器、两台电机和IMU都正常工作时，才认为基线已准备好
   bool have_window = false;
