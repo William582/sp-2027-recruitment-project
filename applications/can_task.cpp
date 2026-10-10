@@ -1,4 +1,27 @@
+/*4.4.1.1. C板基本功能
+基本功能考核作为晋级的必要条件；未完成本项要求者，不予晋级。
+选手须自行完成硬件接线，并使用无线烧录器实现蜂鸣器控制、LED控制、串口打印、遥控器控制等相关功能。
+1. 蜂鸣器控制：当成功烧录或c板上电后，需要有蜂鸣器提示音，音乐可自定义。
+2. LED控制：c板led灯需亮起流水灯灯效，并能够以此判断程序是否堵塞。
+3. 串口打印：需在上位机软件中打印imu三轴数据。
+4. 遥控器控制：使c板与dt7遥控器能够正常通讯。
+
+4.4.1.2. 姿态与电机联动
+1. 当右拨杆处于下档时，系统进入失能模式，即down档，所有电机应处于无力状态。
+2. 右拨杆处于中档时，系统进入姿态联动模式
+  通过C板imu获取姿态信息，控制两台6020电机完成不同的运动。
+  C板及两台电机构成三个旋转输入端（输入的值分别为：C板imu的yaw角度，两个电机编码器数值）。将与C板保持1∶1联动比例的电机记为A电机，另一台记为B电机。B电机的联动比例由左拨杆档位决定：
+  其中，负号表示反向转动。
+  联动控制应满足以下要求：
+  1. 将C板绕yaw轴转动时，两台电机按照设定比例跟随运动。
+  2. 手动转动任一电机时，另一台电机按照对应比例跟随运动；C板的实际偏航角（Yaw）保持不变。手动转动电机后，系统应同步调整C板的联动参考零点，该参考零点随A电机的位置变化。
+  3. 再次转动C板时，两台电机应基于调整后的参考零点继续联动，不应自动返回原零位。(即不会像方向盘一样回正）
+  4. c板和其中一块6020保持1:1联动比（减速比）,  另一块6020和c板的联动比（减速比）和左拨杆有关:下档1:0.5   中档1:-1   上挡1:3
+    （例如在左拨杆上档1:3时，c板绕yaw轴逆时针转60度，A电机逆时针转60度，B电机逆时针转180度）
+3. 右拨杆切换至上档时，进入复位模式
+触发复位功能，两台电机上的R标方向对齐C板上的R标方向。*/
 #include <cmath>
+#include <cstdint>
 
 #include "cmsis_os.h"
 #include "io/can/can.hpp"
@@ -11,10 +34,16 @@ extern sp::DBus remote;
 extern sp::Mahony imu;
 extern volatile bool imu_ready;
 
+// ============================================================
+// 1. CAN 与电机对象
+// ============================================================
+
 sp::CAN can1(&hcan1);
+
 sp::RM_Motor motor_a(1, sp::RM_Motors::GM6020);
 sp::RM_Motor motor_b(2, sp::RM_Motors::GM6020);
 
+// 上位机绘图变量
 volatile float plot_motor_a_target_angle = 0.0f;
 volatile float plot_motor_a_actual_angle = 0.0f;
 volatile float plot_motor_b_target_angle = 0.0f;
@@ -22,79 +51,150 @@ volatile float plot_motor_b_actual_angle = 0.0f;
 
 namespace
 {
+
+// ============================================================
+// 2. 参数配置
+// ============================================================
+
 constexpr float PI = 3.14159265358979323846f;
+constexpr float TWO_PI = 2.0f * PI;
+
+// 电机逻辑方向；若实际方向相反，修改为 -1.0f
 constexpr float MOTOR_A_ENCODER_SIGN = 1.0f;
 constexpr float MOTOR_B_ENCODER_SIGN = 1.0f;
-constexpr bool MOTOR_DIRECTIONS_VERIFIED = true;
 
-constexpr float RATED_TORQUE_SPEED_RPM = 132.0f;
-constexpr float MAX_OUTPUT_SPEED = RATED_TORQUE_SPEED_RPM * (2.0f * PI / 60.0f);
-constexpr float MAX_TORQUE = 1.2f;  //最大力矩
-//Kp
-constexpr float POSITION_TO_SPEED_GAIN = 0.0f;
-constexpr float SPEED_TO_TORQUE_GAIN = 0.0f;
-//time
+// 控制周期
 constexpr float PID_DT = 0.001f;
-//Ki
-constexpr float POSITION_PID_KI = 0.00f;
-constexpr float SPEED_PID_KI = 0.002f;
-//积分项最大输出
-constexpr float POSITION_PID_MAX_IOUT = 0.5f;
-constexpr float SPEED_PID_MAX_IOUT = 0.05f;
 
-constexpr float POSITION_PID_INTEGRAL_PAUSE = 2.0f;  // 2.0s内位置误差大于2.0rad时暂停积分
-constexpr float SPEED_PID_INTEGRAL_PAUSE = 0.15f;    // 0.15s内速度误差大于0.15rad/s时暂停积分
-constexpr float PID_D_FILTER_ALPHA = 0.1f;           //微分项滤波系数，alpha=1时不滤波
+// 速度环输出限幅，即最终电机控制量限幅
+constexpr float MAX_TORQUE = 1.2f;
 
-//电机A和电机B的角度环和速度环的PID控制器
-sp::PID position_pid_a(
-  PID_DT, POSITION_TO_SPEED_GAIN, POSITION_PID_KI, 0.0f, MAX_OUTPUT_SPEED, POSITION_PID_MAX_IOUT,
-  PID_D_FILTER_ALPHA, false, true);
-sp::PID speed_pid_a(
-  PID_DT, SPEED_TO_TORQUE_GAIN, SPEED_PID_KI, 0.0f, MAX_TORQUE, SPEED_PID_MAX_IOUT,
-  PID_D_FILTER_ALPHA, false, true);
-sp::PID position_pid_b(
-  PID_DT, POSITION_TO_SPEED_GAIN, POSITION_PID_KI, 0.0f, MAX_OUTPUT_SPEED, POSITION_PID_MAX_IOUT,
-  PID_D_FILTER_ALPHA, false, true);
-sp::PID speed_pid_b(
-  PID_DT, SPEED_TO_TORQUE_GAIN, SPEED_PID_KI, 0.0f, MAX_TORQUE, SPEED_PID_MAX_IOUT,
-  PID_D_FILTER_ALPHA, false, true);
+// 位置环输出限幅，即目标速度限幅，单位 rad/s
+constexpr float MAX_TARGET_SPEED = 3.0f;
 
-constexpr uint32_t MANUAL_DETECT_WINDOW_MS = 50;
-constexpr uint32_t FOLLOW_SETTLE_TIME_MS = 100;
+// 位置外环 PID 参数
+constexpr float POSITION_PID_KP = 1.2f;
+constexpr float POSITION_PID_KI = 0.0f;
+constexpr float POSITION_PID_KD = 0.0f;
 
-//在检测时间窗内，若 yaw 变化量达到或超过 0.1rad，就认为 yaw 有动作并进入待跟随状态
-constexpr float MANUAL_YAW_STABLE_DELTA = 0.1f;
+// 速度内环 PID 参数
 
-//若某个电机角度变化量达到或超过 0.05，且另一个电机基本没动，则认为检测到该电机的手动转动。
+constexpr float SPEED_PID_KP = 0.2f;
+constexpr float SPEED_PID_KI = 0.0f;
+constexpr float SPEED_PID_KD = 0.0f;
+
+// 手动转动检测参数
+constexpr float YAW_STATIONARY_THRESHOLD = 0.0002f;
 constexpr float MANUAL_MOTOR_DELTA = 0.05f;
 constexpr float OTHER_MOTOR_STABLE_DELTA = 0.015f;
-//稳定条件：在待跟随状态下，若电机角度与目标角度的差值小于 0.03 rad，且电机速度小于 0.1 rad/s，则认为电机已稳定到位。
-constexpr float FOLLOW_POSITION_TOLERANCE = 0.03f;
-constexpr float FOLLOW_SPEED_TOLERANCE = 0.1f;
-// 清零位置环和速度环的PID状态
+
+// ============================================================
+// 3. PID 对象
+// ============================================================
+
+// 位置外环：位置误差 -> 目标速度
+sp::PID position_pid_a(
+  PID_DT, POSITION_PID_KP, POSITION_PID_KI, POSITION_PID_KD, MAX_TARGET_SPEED, 0.0f, 0.1f);
+
+sp::PID position_pid_b(
+  PID_DT, POSITION_PID_KP, POSITION_PID_KI, POSITION_PID_KD, MAX_TARGET_SPEED, 0.0f, 0.1f);
+
+// 速度内环：速度误差 -> 最终控制量
+sp::PID speed_pid_a(PID_DT, SPEED_PID_KP, SPEED_PID_KI, SPEED_PID_KD, MAX_TORQUE, 0.0f, 0.1f);
+
+sp::PID speed_pid_b(PID_DT, SPEED_PID_KP, SPEED_PID_KI, SPEED_PID_KD, MAX_TORQUE, 0.0f, 0.1f);
+
+// ============================================================
+// 4. 基础函数
+// ============================================================
+
+// 清除全部 PID 状态
 void clear_control_pids()
 {
   position_pid_a.clear();
-  speed_pid_a.clear();
   position_pid_b.clear();
+
+  speed_pid_a.clear();
   speed_pid_b.clear();
 }
-// 将遥控器左拨杆的档位转换为联动比例
+
+// 统一 PID 计算接口
+float position_control(sp::PID & pid, float target, float actual)
+{
+  pid.calc(target, actual);
+  return pid.out;
+}
+
+// 单圈角度差解包至 [-PI, PI]
+float unwrap_delta(float delta)
+{
+  while (delta > PI) {
+    delta -= TWO_PI;
+  }
+
+  while (delta < -PI) {
+    delta += TWO_PI;
+  }
+
+  return delta;
+}
+
+// 将单圈角度转为连续角度
+// 注意：相邻两次有效反馈之间的实际转角必须小于 PI
+float update_unwrapped_angle(
+  float raw_angle, float & last_raw_angle, float & continuous_angle, bool & initialized)
+{
+  if (!initialized) {
+    last_raw_angle = raw_angle;
+    continuous_angle = raw_angle;
+    initialized = true;
+    return 0.0f;
+  }
+
+  const float delta = unwrap_delta(raw_angle - last_raw_angle);
+
+  continuous_angle += delta;
+  last_raw_angle = raw_angle;
+
+  return delta;
+}
+
+// 左拨杆对应 B 电机的联动比例
 float ratio_from_switch(sp::DBusSwitchMode mode)
 {
   switch (mode) {
     case sp::DBusSwitchMode::DOWN:
       return 0.5f;
+
     case sp::DBusSwitchMode::MID:
       return -1.0f;
+
     case sp::DBusSwitchMode::UP:
       return 3.0f;
+
+    default:
+      return 0.5f;
   }
-  return 0.5f;
 }
 
-// 将电机反馈数据从CAN总线读取到电机对象中
+// ============================================================
+// 5. 双环控制函数
+// ============================================================
+
+// 位置外环输出目标速度；速度内环输出最终控制量
+float dual_loop_control(
+  sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
+  float actual_speed)
+{
+  const float target_speed = position_control(position_pid, target_angle, actual_angle);
+
+  return position_control(speed_pid, target_speed, actual_speed);
+}
+
+// ============================================================
+// 6. CAN 电机通信
+// ============================================================
+
 void send_motor_commands(float torque_a, float torque_b)
 {
   for (uint8_t i = 0; i < sp::CAN_DATA_LEN; i++) {
@@ -103,16 +203,18 @@ void send_motor_commands(float torque_a, float torque_b)
 
   motor_a.cmd(MOTOR_A_ENCODER_SIGN * torque_a);
   motor_b.cmd(MOTOR_B_ENCODER_SIGN * torque_b);
+
   motor_a.write(can1.tx_data);
   motor_b.write(can1.tx_data);
+
   can1.send(motor_a.tx_id);
 }
 
-// 读取电机反馈数据
 void read_motor_feedback(uint32_t stamp_ms)
 {
   while (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) > 0) {
     can1.recv(CAN_RX_FIFO0);
+
     if (can1.rx_id == motor_a.rx_id) {
       motor_a.read(can1.rx_data, stamp_ms);
     }
@@ -122,205 +224,347 @@ void read_motor_feedback(uint32_t stamp_ms)
   }
 }
 
-// 将角度变化量限制在 [-pi, pi] 范围内, 以便处理角度环绕问题
-float unwrap_delta(float delta)
-{
-  if (delta > PI) return delta - 2.0f * PI;
-  if (delta < -PI) return delta + 2.0f * PI;
-  return delta;
-}
 }  // namespace
-// CAN通信任务函数
+
+// ============================================================
+// 7. CAN 控制任务
+// ============================================================
+
 extern "C" void can_task(void const * argument)
 {
   (void)argument;
+
   osDelay(500);
+
   can1.config();
   can1.start();
 
-  bool have_yaw = false;        // 只有当IMU正常工作时，才认为有有效的yaw数据
-  bool baseline_ready = false;  // 只有当遥控器、两台电机和IMU都正常工作时，才认为基线已准备好
-  bool have_window = false;
-  bool follow_pending = false;
+  // --------------------------------------------------------
+  // A. IMU 连续角度
+  // --------------------------------------------------------
+
+  bool have_yaw = false;
+
+  float last_yaw_raw = 0.0f;
+  float yaw_unwrapped = 0.0f;
+
+  // --------------------------------------------------------
+  // B. A 电机连续角度
+  // --------------------------------------------------------
+
+  bool motor_a_angle_ready = false;
+
+  float motor_a_last_raw = 0.0f;
+  float motor_a_unwrapped_raw = 0.0f;
+
+  // --------------------------------------------------------
+  // C. B 电机连续角度
+  // --------------------------------------------------------
+
+  bool motor_b_angle_ready = false;
+
+  float motor_b_last_raw = 0.0f;
+  float motor_b_unwrapped_raw = 0.0f;
+
+  // --------------------------------------------------------
+  // D. 联动状态变量
+  // --------------------------------------------------------
+
+  bool baseline_ready = false;
   bool have_right_switch = false;
-  float last_yaw_raw = 0.0f;   // 记录上一次的原始yaw值，用于计算角度变化量
-  float yaw_unwrapped = 0.0f;  // 记录解包后的yaw值
-  float startup_yaw = 0.0f;    // 记录启动时的yaw值
-  float startup_a = 0.0f;      // 记录启动时的电机A角度
-  float startup_b = 0.0f;      // 记录启动时的电机B角度
-  float yaw_bias = 0.0f;       // 记录yaw偏置
-  float a_link_offset = 0.0f;  // 记录电机A连杆偏置
-  float b_link_offset = 0.0f;  // 记录电机B连杆偏置
-  float link_ratio = 0.5f;     // 记录联动比例
-  float window_yaw = 0.0f;     // 记录窗口内的yaw值
-  float window_a = 0.0f;       // 记录窗口内的电机A角度
-  float window_b = 0.0f;       // 记录窗口内的电机B角度
-  uint32_t window_start_ms = 0;
-  uint32_t settled_ms = 0;
+
   sp::DBusSwitchMode last_right_switch = sp::DBusSwitchMode::DOWN;
 
+  // 首次初始化时记录的位置，作为复位目标
+  float startup_a = 0.0f;
+  float startup_b = 0.0f;
+
+  // 统一虚拟联动角度
+  float link_angle = 0.0f;
+
+  // 电机位置偏置
+  float a_link_offset = 0.0f;
+  float b_link_offset = 0.0f;
+
+  // B 电机联动比例
+  float link_ratio = 0.5f;
+
+  // ========================================================
+  // 主循环
+  // ========================================================
+
   while (true) {
-    //1.首先判断遥控器、IMU和电机是否正常工作，随后读取yaw值
+    // ----------------------------------------------------
+    // 1. 读取电机反馈及设备状态
+    // ----------------------------------------------------
+
     const uint32_t now_ms = HAL_GetTick();
+
     read_motor_feedback(now_ms);
 
     const bool remote_alive = remote.is_alive(now_ms);
-    const bool motors_alive = motor_a.is_alive(now_ms) && motor_b.is_alive(now_ms);
+    const bool motor_a_alive = motor_a.is_alive(now_ms);
+    const bool motor_b_alive = motor_b.is_alive(now_ms);
+    const bool motors_alive = motor_a_alive && motor_b_alive;
+
+    // ----------------------------------------------------
+    // 2. 更新 IMU 连续 Yaw
+    // ----------------------------------------------------
+
+    float yaw_step = 0.0f;
 
     if (imu_ready) {
-      const float yaw_raw = imu.yaw;
-      if (!have_yaw) {
-        last_yaw_raw = yaw_raw;
-        yaw_unwrapped = yaw_raw;
-        have_yaw = true;
-      }
-      else {
-        yaw_unwrapped += unwrap_delta(yaw_raw - last_yaw_raw);
-        last_yaw_raw = yaw_raw;
-      }
+      yaw_step = update_unwrapped_angle(imu.yaw, last_yaw_raw, yaw_unwrapped, have_yaw);
     }
 
-    const float angle_a = MOTOR_A_ENCODER_SIGN * motor_a.angle;
-    const float angle_b = MOTOR_B_ENCODER_SIGN * motor_b.angle;
-    const float speed_a = MOTOR_A_ENCODER_SIGN * motor_a.speed;
-    const float speed_b = MOTOR_B_ENCODER_SIGN * motor_b.speed;
+    // ----------------------------------------------------
+    // 3. 更新两台电机连续角度
+    // ----------------------------------------------------
 
-    plot_motor_a_target_angle = angle_a;
+    if (motor_a_alive) {
+      update_unwrapped_angle(
+        motor_a.angle, motor_a_last_raw, motor_a_unwrapped_raw, motor_a_angle_ready);
+    }
+
+    if (motor_b_alive) {
+      update_unwrapped_angle(
+        motor_b.angle, motor_b_last_raw, motor_b_unwrapped_raw, motor_b_angle_ready);
+    }
+
+    const float angle_a = motor_a_angle_ready ? MOTOR_A_ENCODER_SIGN * motor_a_unwrapped_raw : 0.0f;
+    const float angle_b = motor_b_angle_ready ? MOTOR_B_ENCODER_SIGN * motor_b_unwrapped_raw : 0.0f;
+
+    // ----------------------------------------------------
+    // 4. 读取速度反馈
+    // ----------------------------------------------------
+    // 速度反馈方向必须和对应的逻辑角度方向一致。
+
+    const float actual_speed_a = MOTOR_A_ENCODER_SIGN * motor_a.speed;
+
+    const float actual_speed_b = MOTOR_B_ENCODER_SIGN * motor_b.speed;
+
+    // 上位机绘图
     plot_motor_a_actual_angle = angle_a;
-    plot_motor_b_target_angle = angle_b;
     plot_motor_b_actual_angle = angle_b;
 
-    if (!baseline_ready && remote_alive && motors_alive && have_yaw) {
-      const float initial_ratio = ratio_from_switch(remote.sw_l);
-      startup_yaw = yaw_unwrapped;
+    plot_motor_a_target_angle = angle_a;
+    plot_motor_b_target_angle = angle_b;
+
+    // ----------------------------------------------------
+    // 5. 初始化联动基准
+    // ----------------------------------------------------
+
+    if (
+      !baseline_ready && remote_alive && motors_alive && have_yaw && motor_a_angle_ready &&
+      motor_b_angle_ready) {
+      // 假设初始化时已经将机械 R 标对齐
       startup_a = angle_a;
       startup_b = angle_b;
-      link_ratio = initial_ratio;
-      a_link_offset = angle_a - yaw_unwrapped;  //初始C板和A电机的角度差
-      b_link_offset = angle_b - initial_ratio * yaw_unwrapped;
+
+      link_angle = yaw_unwrapped;
+
+      link_ratio = ratio_from_switch(remote.sw_l);
+
+      a_link_offset = angle_a - link_angle;
+
+      b_link_offset = angle_b - link_ratio * link_angle;
+
       baseline_ready = true;
     }
 
+    // ----------------------------------------------------
+    // 6. 设备状态检查
+    // ----------------------------------------------------
+
+    const bool control_ready = baseline_ready && remote_alive && motors_alive && have_yaw &&
+                               imu_ready && motor_a_angle_ready && motor_b_angle_ready;
+
     float torque_a = 0.0f;
-    float torque_b = 0.0f;  //设定力矩变量
+    float torque_b = 0.0f;
 
-    const bool control_ready =
-      baseline_ready && remote_alive && motors_alive && have_yaw && MOTOR_DIRECTIONS_VERIFIED;
-
-    if (control_ready) {
-      const sp::DBusSwitchMode right_switch = remote.sw_r;
-      const float ratio = ratio_from_switch(remote.sw_l);
-      //当第一次检测到右拨杆的档位或右拨杆档位发生变化时，清零PID状态，并根据档位设置初始偏置和联动比例
-      if (!have_right_switch || right_switch != last_right_switch) {
-        clear_control_pids();
-        if (right_switch == sp::DBusSwitchMode::MID) {
-          yaw_bias = 0.0f;
-          a_link_offset = angle_a - yaw_unwrapped;
-          b_link_offset = angle_b - ratio * yaw_unwrapped;
-          follow_pending = false;
-          settled_ms = 0;
-          link_ratio = ratio;
-        }
-        else if (right_switch == sp::DBusSwitchMode::UP) {
-          follow_pending = false;
-          settled_ms = 0;
-        }
-        else {
-          follow_pending = false;
-          settled_ms = 0;
-        }
-
-        last_right_switch = right_switch;
-        have_right_switch = true;
-        have_window = false;
-      }  //完成初始化配置
-
-      //当右拨杆处于中档时，进行联动控制
-      if (right_switch == sp::DBusSwitchMode::MID) {
-        if (ratio != link_ratio) {
-          b_link_offset = angle_b - ratio * (yaw_unwrapped + yaw_bias);
-          link_ratio = ratio;
-        }
-
-        if (!have_window) {
-          window_yaw = yaw_unwrapped;
-          window_a = angle_a;
-          window_b = angle_b;
-          window_start_ms = now_ms;
-          have_window = true;
-        }
-        else if (now_ms - window_start_ms >= MANUAL_DETECT_WINDOW_MS) {
-          const float yaw_delta = yaw_unwrapped - window_yaw;
-          const float delta_a = angle_a - window_a;
-          const float delta_b = angle_b - window_b;
-          //进入AB电机手动跟随模式
-          if (fabsf(yaw_delta) >= MANUAL_YAW_STABLE_DELTA) {
-            follow_pending = true;
-            settled_ms = 0;
-          }
-          else if (!follow_pending) {
-            if (
-              fabsf(delta_a) >= MANUAL_MOTOR_DELTA && fabsf(delta_b) <= OTHER_MOTOR_STABLE_DELTA) {
-              yaw_bias += delta_a;
-              follow_pending = true;
-              settled_ms = 0;
-            }
-            else if (
-              fabsf(delta_b) >= MANUAL_MOTOR_DELTA && fabsf(delta_a) <= OTHER_MOTOR_STABLE_DELTA) {
-              yaw_bias += delta_b / ratio;
-              follow_pending = true;
-              settled_ms = 0;
-            }
-          }
-
-          window_yaw = yaw_unwrapped;
-          window_a = angle_a;
-          window_b = angle_b;
-          window_start_ms = now_ms;
-        }
-
-        const float target_a = a_link_offset + yaw_unwrapped + yaw_bias;
-        const float target_b = b_link_offset + ratio * (yaw_unwrapped + yaw_bias);
-        plot_motor_a_target_angle = target_a;
-        plot_motor_b_target_angle = target_b;
-
-        if (follow_pending) {
-          const bool settled = fabsf(target_a - angle_a) < FOLLOW_POSITION_TOLERANCE &&
-                               fabsf(target_b - angle_b) < FOLLOW_POSITION_TOLERANCE &&
-                               fabsf(speed_a) < FOLLOW_SPEED_TOLERANCE &&
-                               fabsf(speed_b) < FOLLOW_SPEED_TOLERANCE;
-          settled_ms = settled ? settled_ms + 1 : 0;
-          if (settled_ms >= FOLLOW_SETTLE_TIME_MS) {
-            follow_pending = false;
-            settled_ms = 0;
-          }
-        }
-
-        position_pid_a.calc(target_a, angle_a, POSITION_PID_INTEGRAL_PAUSE);
-        speed_pid_a.calc(position_pid_a.out, speed_a, SPEED_PID_INTEGRAL_PAUSE);
-        position_pid_b.calc(target_b, angle_b, POSITION_PID_INTEGRAL_PAUSE);
-        speed_pid_b.calc(position_pid_b.out, speed_b, SPEED_PID_INTEGRAL_PAUSE);
-        torque_a = speed_pid_a.out;
-        torque_b = speed_pid_b.out;
-      }
-      else if (right_switch == sp::DBusSwitchMode::UP) {
-        const float yaw_delta = yaw_unwrapped - startup_yaw;
-        const float target_a = startup_a + yaw_delta;
-        const float target_b = startup_b + ratio * yaw_delta;
-        plot_motor_a_target_angle = target_a;
-        plot_motor_b_target_angle = target_b;
-        position_pid_a.calc(target_a, angle_a, POSITION_PID_INTEGRAL_PAUSE);
-        speed_pid_a.calc(position_pid_a.out, speed_a, SPEED_PID_INTEGRAL_PAUSE);
-        position_pid_b.calc(target_b, angle_b, POSITION_PID_INTEGRAL_PAUSE);
-        speed_pid_b.calc(position_pid_b.out, speed_b, SPEED_PID_INTEGRAL_PAUSE);
-        torque_a = speed_pid_a.out;
-        torque_b = speed_pid_b.out;
-      }
-    }
-    else {
+    if (!control_ready) {
       clear_control_pids();
+
+      have_right_switch = false;
+
+      send_motor_commands(0.0f, 0.0f);
+
+      osDelay(1);
+      continue;
     }
+
+    // ----------------------------------------------------
+    // 7. 获取遥控器档位
+    // ----------------------------------------------------
+
+    const sp::DBusSwitchMode right_switch = remote.sw_r;
+
+    const float ratio = ratio_from_switch(remote.sw_l);
+
+    bool entered_mid = false;
+
+    // ----------------------------------------------------
+    // 8. 处理右拨杆切换
+    // ----------------------------------------------------
+
+    if (!have_right_switch || right_switch != last_right_switch) {
+      clear_control_pids();
+
+      if (right_switch == sp::DBusSwitchMode::MID) {
+        // 切入联动时，当前位置作为新的参考
+        link_angle = yaw_unwrapped;
+
+        link_ratio = ratio;
+
+        a_link_offset = angle_a - link_angle;
+
+        b_link_offset = angle_b - link_ratio * link_angle;
+
+        entered_mid = true;
+      }
+
+      last_right_switch = right_switch;
+      have_right_switch = true;
+    }
+
+    // ====================================================
+    // 9. 三种控制模式
+    // ====================================================
+
+    switch (right_switch) {
+        // ----------------------------------------------------
+        // DOWN：失能模式
+        // ----------------------------------------------------
+
+      case sp::DBusSwitchMode::DOWN:
+
+        torque_a = 0.0f;
+        torque_b = 0.0f;
+
+        clear_control_pids();
+
+        break;
+
+        // ----------------------------------------------------
+        // MID：姿态联动模式
+        // ----------------------------------------------------
+
+      case sp::DBusSwitchMode::MID: {
+        // 更新虚拟联动角度
+        if (!entered_mid) {
+          link_angle += yaw_step;
+        }
+
+        // -----------------------------------------------
+        // 9.1 左拨杆比例切换
+        // -----------------------------------------------
+
+        if (std::fabs(ratio - link_ratio) > 1e-6f) {
+          // 切换比例时保持 B 电机目标位置连续
+          b_link_offset = angle_b - ratio * link_angle;
+
+          link_ratio = ratio;
+
+          clear_control_pids();
+        }
+
+        // -----------------------------------------------
+        // 9.2 计算初始目标
+        // -----------------------------------------------
+
+        float target_a = a_link_offset + link_angle;
+
+        float target_b = b_link_offset + ratio * link_angle;
+
+        // -----------------------------------------------
+        // 9.3 手动转动检测
+        // -----------------------------------------------
+
+        if (std::fabs(yaw_step) < YAW_STATIONARY_THRESHOLD) {
+          const float error_a = target_a - angle_a;
+
+          const float error_b = target_b - angle_b;
+
+          // A 电机被手动转动，B 电机基本稳定
+          if (
+            std::fabs(error_a) >= MANUAL_MOTOR_DELTA &&
+            std::fabs(error_b) <= OTHER_MOTOR_STABLE_DELTA) {
+            link_angle -= error_a;
+          }
+
+          // B 电机被手动转动，A 电机基本稳定
+          else if (
+            std::fabs(error_b) >= MANUAL_MOTOR_DELTA &&
+            std::fabs(error_a) <= OTHER_MOTOR_STABLE_DELTA) {
+            link_angle -= error_b / ratio;
+          }
+        }
+
+        // -----------------------------------------------
+        // 9.4 重新计算两台电机的目标位置
+        // -----------------------------------------------
+
+        target_a = a_link_offset + link_angle;
+
+        target_b = b_link_offset + ratio * link_angle;
+
+        plot_motor_a_target_angle = target_a;
+        plot_motor_b_target_angle = target_b;
+
+        // -----------------------------------------------
+        // 9.5 双环控制
+        // -----------------------------------------------
+
+        torque_a =
+          dual_loop_control(position_pid_a, speed_pid_a, target_a, angle_a, actual_speed_a);
+
+        torque_b =
+          dual_loop_control(position_pid_b, speed_pid_b, target_b, angle_b, actual_speed_b);
+
+        break;
+      }
+
+        // ----------------------------------------------------
+        // UP：复位模式
+        // ----------------------------------------------------
+
+      case sp::DBusSwitchMode::UP: {
+        // 回到首次初始化时记录的位置。
+        // 初始化位置只有在机械 R 标已经对齐时
+        // 才能作为机械复位位置。
+
+        const float target_a = startup_a;
+        const float target_b = startup_b;
+
+        plot_motor_a_target_angle = target_a;
+        plot_motor_b_target_angle = target_b;
+
+        // 位置外环 + 速度内环
+        torque_a =
+          dual_loop_control(position_pid_a, speed_pid_a, target_a, angle_a, actual_speed_a);
+
+        torque_b =
+          dual_loop_control(position_pid_b, speed_pid_b, target_b, angle_b, actual_speed_b);
+
+        break;
+      }
+
+      default:
+
+        torque_a = 0.0f;
+        torque_b = 0.0f;
+
+        clear_control_pids();
+
+        break;
+    }
+
+    // ----------------------------------------------------
+    // 10. 发送电机控制指令
+    // ----------------------------------------------------
+
     send_motor_commands(torque_a, torque_b);
+
     osDelay(1);
   }
 }

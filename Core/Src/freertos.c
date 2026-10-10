@@ -122,11 +122,11 @@ void MX_FREERTOS_Init(void) {
   LEDTaskHandle = osThreadCreate(osThread(LEDTask), NULL);
 
   /* definition and creation of BuzzerTask */
-  osThreadDef(BuzzerTask, buzzer_task, osPriorityHigh, 0, 128);
+  osThreadDef(BuzzerTask, buzzer_task, osPriorityLow, 0, 128);
   BuzzerTaskHandle = osThreadCreate(osThread(BuzzerTask), NULL);
 
   /* definition and creation of IMUTask */
-  osThreadDef(IMUTask, imu_task, osPriorityIdle, 0, 256);
+  osThreadDef(IMUTask, imu_task, osPriorityHigh, 0, 256);
   IMUTaskHandle = osThreadCreate(osThread(IMUTask), NULL);
 
   /* definition and creation of Dt7Task */
@@ -134,11 +134,11 @@ void MX_FREERTOS_Init(void) {
   Dt7TaskHandle = osThreadCreate(osThread(Dt7Task), NULL);
 
   /* definition and creation of PlotterTask */
-  osThreadDef(PlotterTask, plotter_task, osPriorityLow, 0, 128);
+  osThreadDef(PlotterTask, plotter_task, osPriorityBelowNormal, 0, 128);
   PlotterTaskHandle = osThreadCreate(osThread(PlotterTask), NULL);
 
   /* definition and creation of CANTask */
-  osThreadDef(CANTask, can_task, osPriorityLow, 0, 128);
+  osThreadDef(CANTask, can_task, osPriorityRealtime, 0, 1024);
   CANTaskHandle = osThreadCreate(osThread(CANTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
